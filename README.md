@@ -96,6 +96,12 @@ echo 0 | sudo tee /sys/class/hwmon/hwmonN/power11_cap
 
 Under full load (all 20 cores): ~92 W package, ~64 W CPU_P, ~10.5 W CPU_E.
 
+Monitor all channels live:
+
+```bash
+watch -n 0.1 sensors 'spbm-*'
+```
+
 ## Install via DKMS
 
 ```bash
