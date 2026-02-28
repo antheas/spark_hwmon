@@ -6,7 +6,8 @@
  * standard Linux hwmon sensors. The MTEL (NVDA8800) ACPI device
  * provides a _DSM that describes its memory resources; this driver
  * queries _DSM function 1 at probe time to locate the "SPBM" region
- * by name rather than hard-coding a _CRS index.
+ * by name, and _DSM function 2 to discover register offsets by their
+ * canonical names rather than hard-coding addresses.
  *
  * The SPBM firmware (running on MediaTek SSPM) continuously updates
  * these registers with live power telemetry in milliwatts,
@@ -36,6 +37,9 @@
 #define DRIVER_NAME	"spbm"
 #define SPBM_SIZE	0x1000
 
+/* Sentinel: offset not discovered via _DSM */
+#define OFF_UNKNOWN	U32_MAX
+
 /*
  * _DSM UUID for NVDA8800 MTEL device.
  * Function 1 returns resource names, function 2 returns register maps.
@@ -45,115 +49,71 @@ static const guid_t mtel_dsm_guid =
 		  0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc);
 
 /*
- * Register offsets within the SPBM region.
- * Firmware writes milliwatts for power, millijoules for energy,
- * and millidegrees Celsius for temperatures.
- * hwmon expects microwatts, microjoules, and millidegrees respectively.
+ * Channel definition: _DSM register name -> hwmon label.
+ * Offsets are discovered at probe time via _DSM function 2.
  */
-
-/* Instantaneous power telemetry (mW) */
-#define TE_SYS_TOTAL	0x300
-#define TE_SOC_PKG	0x304
-#define TE_C_AND_G	0x308
-#define TE_CPU_P	0x30C
-#define TE_CPU_E	0x310
-#define TE_VCORE	0x314
-#define TE_VDDQ	0x318
-#define TE_CHR		0x31C
-#define TE_GPC_OUT	0x320
-#define TE_GPU_OUT	0x324
-#define TE_GPC_IN	0x328
-#define TE_GPU_IN	0x32C
-#define TE_SYS_IN	0x330
-#define TE_DLA_IN	0x334
-#define TE_PREREG_IN	0x338
-#define TE_DLA_OUT	0x33C
-
-/* Energy accumulators (mJ) */
-#define EN_PKG		0x344
-#define EN_CPU_E	0x350
-#define EN_CPU_P	0x35C
-#define EN_GPC		0x368
-#define EN_GPM		0x374
-
-/* Power limits (effective, mW) */
-#define PL1_EFF		0x160
-#define PL2_EFF		0x164
-#define SYSPL1_EFF	0x170
-
-/* Power budgets (mW) */
-#define BUD_CPU		0x600
-#define BUD_GPU		0x604
-#define BUD_CPU_E	0x680
-#define BUD_CPU_P	0x684
-
-/* Thermal zone temperatures (millidegrees C) */
-#define TZ_TJ_MAX	0x818
-#define TZ_TJ_MAX_C	0x81C
-#define TZ_CPU_E_0	0x820
-#define TZ_CPU_P_0	0x824
-#define TZ_CPU_E_1	0x828
-#define TZ_CPU_P_1	0x82C
-#define TZ_GPU		0x830
-#define TZ_SOC		0x834
-#define TZ_DLA		0x838
-
 struct spbm_chan {
-	u32 offset;
-	const char *label;
+	const char *dsm_key;	/* _DSM register name to match */
+	const char *label;	/* hwmon label */
 };
 
+/* Power channels (mW in firmware, uW in hwmon) */
 static const struct spbm_chan pwr_chans[] = {
-	{ TE_SYS_TOTAL, "sys_total" },
-	{ TE_SOC_PKG,   "soc_pkg" },
-	{ TE_C_AND_G,   "cpu_gpu" },
-	{ TE_CPU_P,     "cpu_p" },
-	{ TE_CPU_E,     "cpu_e" },
-	{ TE_VCORE,     "vcore" },
-	{ TE_VDDQ,      "vddq" },
-	{ TE_CHR,       "dc_input" },
-	{ TE_GPU_OUT,   "gpu_out" },
-	{ TE_GPC_OUT,   "gpc_out" },
-	{ TE_GPU_IN,    "gpu_in" },
-	{ TE_GPC_IN,    "gpc_in" },
-	{ TE_SYS_IN,    "sys_in" },
-	{ TE_PREREG_IN, "prereg_in" },
-	{ TE_DLA_IN,    "dla_in" },
-	{ TE_DLA_OUT,   "dla_out" },
-	{ PL1_EFF,      "pl1" },
-	{ PL2_EFF,      "pl2" },
-	{ SYSPL1_EFF,   "syspl1" },
-	{ BUD_CPU,      "budget_cpu" },
-	{ BUD_GPU,      "budget_gpu" },
-	{ BUD_CPU_E,    "budget_cpu_e" },
-	{ BUD_CPU_P,    "budget_cpu_p" },
+	{ "SPBM_TE_SYS_TOTAL_TELEMETRY_OFFSET",	"sys_total" },
+	{ "SPBM_TE_SOC_PKG_TELEMETRY_OFFSET",		"soc_pkg" },
+	{ "SPBM_TE_C_AND_G_TELEMETRY_OFFSET",		"cpu_gpu" },
+	{ "SPBM_TE_CPU_P_TELEMETRY_OFFSET",		"cpu_p" },
+	{ "SPBM_TE_CPU_E_TELEMETRY_OFFSET",		"cpu_e" },
+	{ "SPBM_TE_VCORE_TELEMETRY_OFFSET",		"vcore" },
+	{ "SPBM_TE_VDDQ_TELEMETRY_OFFSET",		"vddq" },
+	{ "SPBM_TE_CHR_TELEMETRY_OFFSET",		"dc_input" },
+	{ "SPBM_TE_TOTAL_GPU_OUT_OFFSET",		"gpu_out" },
+	{ "SPBM_TE_GPC_OUT_OFFSET",			"gpc_out" },
+	{ "SPBM_TE_TOTAL_GPU_IN_OFFSET",		"gpu_in" },
+	{ "SPBM_TE_GPC_IN_OFFSET",			"gpc_in" },
+	{ "SPBM_TE_TOTAL_SYS_IN_OFFSET",		"sys_in" },
+	{ "SPBM_TE_PREREG_IN_OFFSET",			"prereg_in" },
+	{ "SPBM_TE_DLA_IN_OFFSET",			"dla_in" },
+	{ "SPBM_TE_DLA_OUT_OFFSET",			"dla_out" },
+	{ "SPBM_PL1_VAL_OFFSET",			"pl1" },
+	{ "SPBM_PL2_VAL_OFFSET",			"pl2" },
+	{ "SPBM_SYSPL1_VAL_OFFSET",			"syspl1" },
+	{ "SPBM_BUDGET_CPU_INST_OFFSET",		"budget_cpu" },
+	{ "SPBM_BUDGET_GPU_INST_OFFSET",		"budget_gpu" },
+	{ "SPBM_BUDGET_CPU_E_INST_OFFSET",		"budget_cpu_e" },
+	{ "SPBM_BUDGET_CPU_P_INST_OFFSET",		"budget_cpu_p" },
 };
 #define N_PWR ARRAY_SIZE(pwr_chans)
 
+/* Energy channels (mJ in firmware, uJ in hwmon) */
 static const struct spbm_chan nrg_chans[] = {
-	{ EN_PKG,   "pkg" },
-	{ EN_CPU_E, "cpu_e" },
-	{ EN_CPU_P, "cpu_p" },
-	{ EN_GPC,   "gpc" },
-	{ EN_GPM,   "gpm" },
+	{ "SPBM_PKG_ENERGY_VALUE_ACCUMULATE_OFFSET",	"pkg" },
+	{ "SPBM_CPU_E_ENERGY_VALUE_ACCUMULATE_OFFSET",	"cpu_e" },
+	{ "SPBM_CPU_P_ENERGY_VALUE_ACCUMULATE_OFFSET",	"cpu_p" },
+	{ "SPBM_GPC_ENERGY_VALUE_ACCUMULATE_OFFSET",	"gpc" },
+	{ "SPBM_GPM_ENERGY_VALUE_ACCUMULATE_OFFSET",	"gpm" },
 };
 #define N_NRG ARRAY_SIZE(nrg_chans)
 
+/* Temperature channels (millidegrees C in both firmware and hwmon) */
 static const struct spbm_chan temp_chans[] = {
-	{ TZ_TJ_MAX,  "tj_max" },
-	{ TZ_TJ_MAX_C, "tj_max_c" },
-	{ TZ_CPU_E_0, "cpu_e_clu0" },
-	{ TZ_CPU_P_0, "cpu_p_clu0" },
-	{ TZ_CPU_E_1, "cpu_e_clu1" },
-	{ TZ_CPU_P_1, "cpu_p_clu1" },
-	{ TZ_GPU,     "gpu" },
-	{ TZ_SOC,     "soc" },
-	{ TZ_DLA,     "dla" },
+	{ "SPBM_PKG_TJ_MAX_OFFSET",				"tj_max" },
+	{ "SPBM_PKG_TJ_MAX_C_OFFSET",				"tj_max_c" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_CPU_E_CLU_0_OFFSET",	"cpu_e_clu0" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_CPU_P_CLU_0_OFFSET",	"cpu_p_clu0" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_CPU_E_CLU_1_OFFSET",	"cpu_e_clu1" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_CPU_P_CLU_1_OFFSET",	"cpu_p_clu1" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_GPU_OFFSET",		"gpu" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_SOC_OFFSET",		"soc" },
+	{ "SPBM_PKG_THERMAL_ZONE_TEMP_DLA_OFFSET",		"dla" },
 };
 #define N_TEMP ARRAY_SIZE(temp_chans)
 
 struct spbm_priv {
 	void __iomem *base;
+	u32 pwr_off[N_PWR];
+	u32 nrg_off[N_NRG];
+	u32 temp_off[N_TEMP];
 };
 
 /* hwmon callbacks */
@@ -161,13 +121,18 @@ struct spbm_priv {
 static umode_t spbm_visible(const void *data, enum hwmon_sensor_types type,
 			     u32 attr, int ch)
 {
+	const struct spbm_priv *p = data;
+
 	if (type == hwmon_power && ch < N_PWR &&
+	    p->pwr_off[ch] != OFF_UNKNOWN &&
 	    (attr == hwmon_power_input || attr == hwmon_power_label))
 		return 0444;
 	if (type == hwmon_energy && ch < N_NRG &&
+	    p->nrg_off[ch] != OFF_UNKNOWN &&
 	    (attr == hwmon_energy_input || attr == hwmon_energy_label))
 		return 0444;
 	if (type == hwmon_temp && ch < N_TEMP &&
+	    p->temp_off[ch] != OFF_UNKNOWN &&
 	    (attr == hwmon_temp_input || attr == hwmon_temp_label))
 		return 0444;
 	return 0;
@@ -179,18 +144,21 @@ static int spbm_read(struct device *dev, enum hwmon_sensor_types type,
 	struct spbm_priv *p = dev_get_drvdata(dev);
 	u32 raw;
 
-	if (type == hwmon_power && attr == hwmon_power_input && ch < N_PWR) {
-		raw = ioread32(p->base + pwr_chans[ch].offset);
+	if (type == hwmon_power && attr == hwmon_power_input && ch < N_PWR &&
+	    p->pwr_off[ch] != OFF_UNKNOWN) {
+		raw = ioread32(p->base + p->pwr_off[ch]);
 		*val = (long)raw * 1000; /* mW -> uW */
 		return 0;
 	}
-	if (type == hwmon_energy && attr == hwmon_energy_input && ch < N_NRG) {
-		raw = ioread32(p->base + nrg_chans[ch].offset);
+	if (type == hwmon_energy && attr == hwmon_energy_input && ch < N_NRG &&
+	    p->nrg_off[ch] != OFF_UNKNOWN) {
+		raw = ioread32(p->base + p->nrg_off[ch]);
 		*val = (long)raw * 1000; /* mJ -> uJ */
 		return 0;
 	}
-	if (type == hwmon_temp && attr == hwmon_temp_input && ch < N_TEMP) {
-		raw = ioread32(p->base + temp_chans[ch].offset);
+	if (type == hwmon_temp && attr == hwmon_temp_input && ch < N_TEMP &&
+	    p->temp_off[ch] != OFF_UNKNOWN) {
+		raw = ioread32(p->base + p->temp_off[ch]);
 		*val = (long)raw; /* already millidegrees C */
 		return 0;
 	}
@@ -296,6 +264,90 @@ free:
 	return ret;
 }
 
+/*
+ * Look up a DSM key in a channel table and store the offset.
+ * Returns true if the key matched a channel.
+ */
+static bool spbm_try_resolve(const char *key, u64 offset,
+			     const struct spbm_chan *chans, u32 *offsets,
+			     int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++) {
+		if (!strcmp(chans[i].dsm_key, key)) {
+			offsets[i] = (u32)offset;
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Call _DSM function 2 with sub-index @sub_idx.  Walk the returned
+ * nested packages of {count, "name", offset, ...} pairs and resolve
+ * offsets for all channel tables.
+ */
+static int spbm_dsm_resolve_offsets(struct device *dev, acpi_handle handle,
+				    int sub_idx, struct spbm_priv *p)
+{
+	union acpi_object arg_elem, arg_pkg;
+	union acpi_object *out, *sub, *elem;
+	int i, j, count, resolved = 0;
+
+	arg_elem.type = ACPI_TYPE_INTEGER;
+	arg_elem.integer.value = sub_idx;
+	arg_pkg.type = ACPI_TYPE_PACKAGE;
+	arg_pkg.package.count = 1;
+	arg_pkg.package.elements = &arg_elem;
+
+	out = acpi_evaluate_dsm(handle, &mtel_dsm_guid, 0, 2, &arg_pkg);
+	if (!out)
+		return -ENODEV;
+
+	if (out->type != ACPI_TYPE_PACKAGE) {
+		ACPI_FREE(out);
+		return -EINVAL;
+	}
+
+	/* Walk each sub-package: {count, name1, off1, name2, off2, ...} */
+	for (i = 0; i < out->package.count; i++) {
+		sub = &out->package.elements[i];
+		if (sub->type != ACPI_TYPE_PACKAGE || sub->package.count < 3)
+			continue;
+
+		elem = sub->package.elements;
+		if (elem[0].type != ACPI_TYPE_INTEGER)
+			continue;
+		count = elem[0].integer.value;
+
+		for (j = 0; j < count; j++) {
+			int ni = 1 + j * 2;	/* name index */
+			int oi = 2 + j * 2;	/* offset index */
+
+			if (oi >= sub->package.count)
+				break;
+			if (elem[ni].type != ACPI_TYPE_STRING ||
+			    elem[oi].type != ACPI_TYPE_INTEGER)
+				continue;
+
+			if (spbm_try_resolve(elem[ni].string.pointer,
+					     elem[oi].integer.value,
+					     pwr_chans, p->pwr_off, N_PWR) ||
+			    spbm_try_resolve(elem[ni].string.pointer,
+					     elem[oi].integer.value,
+					     nrg_chans, p->nrg_off, N_NRG) ||
+			    spbm_try_resolve(elem[ni].string.pointer,
+					     elem[oi].integer.value,
+					     temp_chans, p->temp_off, N_TEMP))
+				resolved++;
+		}
+	}
+
+	ACPI_FREE(out);
+	return resolved;
+}
+
 /* ACPI driver */
 
 static int spbm_add(struct acpi_device *adev)
@@ -306,12 +358,16 @@ static int spbm_add(struct acpi_device *adev)
 	resource_size_t phys = 0;
 	struct spbm_priv *p;
 	struct device *hwdev;
-	int spbm_idx, idx = 0, ret;
-	u32 test;
+	int spbm_idx, idx = 0, ret, resolved;
 
 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
+
+	/* Initialize all offsets to "unknown" */
+	memset(p->pwr_off, 0xFF, sizeof(p->pwr_off));
+	memset(p->nrg_off, 0xFF, sizeof(p->nrg_off));
+	memset(p->temp_off, 0xFF, sizeof(p->temp_off));
 
 	/* Ask _DSM which _CRS resource is "SPBM" */
 	spbm_idx = spbm_dsm_find_resource(adev->handle, "SPBM");
@@ -320,6 +376,15 @@ static int spbm_add(struct acpi_device *adev)
 			spbm_idx);
 		return spbm_idx;
 	}
+
+	/* Resolve register offsets from _DSM function 2 */
+	resolved = spbm_dsm_resolve_offsets(dev, adev->handle, spbm_idx, p);
+	if (resolved < 0) {
+		dev_err(dev, "_DSM register map query failed (%d)\n", resolved);
+		return resolved;
+	}
+	dev_info(dev, "resolved %d/%zu register offsets from _DSM\n",
+		 resolved, N_PWR + N_NRG + N_TEMP);
 
 	/* Walk _CRS to find the memory resource at that index */
 	INIT_LIST_HEAD(&res_list);
@@ -348,17 +413,18 @@ static int spbm_add(struct acpi_device *adev)
 	if (!p->base)
 		return -ENOMEM;
 
-	/* Sanity check */
-	test = ioread32(p->base + TE_SYS_TOTAL);
-	if (test == 0 || test == 0xFFFFFFFF)
-		dev_warn(dev, "SYS_TOTAL=%u, telemetry may be inactive\n",
-			 test);
-	else
-		dev_info(dev, "live at 0x%llx (res %d): SYS=%u mW, SOC=%u mW,"
-			 " CPU_P=%u mW, GPU=%u mW\n", (u64)phys, spbm_idx,
-			 test, ioread32(p->base + TE_SOC_PKG),
-			 ioread32(p->base + TE_CPU_P),
-			 ioread32(p->base + TE_GPU_OUT));
+	/* Sanity check: read first power channel if resolved */
+	if (p->pwr_off[0] != OFF_UNKNOWN) {
+		u32 test = ioread32(p->base + p->pwr_off[0]);
+
+		if (test == 0 || test == 0xFFFFFFFF)
+			dev_warn(dev, "%s=%u, telemetry may be inactive\n",
+				 pwr_chans[0].label, test);
+		else
+			dev_info(dev, "live at 0x%llx (res %d): %s=%u mW\n",
+				 (u64)phys, spbm_idx,
+				 pwr_chans[0].label, test);
+	}
 
 	hwdev = devm_hwmon_device_register_with_info(dev, DRIVER_NAME, p,
 						     &spbm_chip, NULL);
