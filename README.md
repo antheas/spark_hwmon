@@ -131,10 +131,6 @@ At probe time, it queries the device's `_DSM` method
 This makes the driver resilient to firmware updates that change the memory
 layout. Channels whose offsets cannot be resolved are automatically hidden.
 
-The MTEL device lacks `_UID` and `_STA` in the DSDT, so the kernel never
-creates a `platform_device` for it — this is why an `acpi_driver` is used
-instead of a `platform_driver`.
-
 The SPBM region was discovered by reverse-engineering the DSDT.
 No upstream Linux driver exists as of kernel 7.0.
 
