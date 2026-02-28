@@ -67,14 +67,9 @@ static const struct spbm_chan pwr_chans[] = {
 	{ "SPBM_TE_VCORE_TELEMETRY_OFFSET",		"vcore" },
 	{ "SPBM_TE_VDDQ_TELEMETRY_OFFSET",		"vddq" },
 	{ "SPBM_TE_CHR_TELEMETRY_OFFSET",		"dc_input" },
-	{ "SPBM_TE_TOTAL_GPU_OUT_OFFSET",		"gpu_out" },
-	{ "SPBM_TE_GPC_OUT_OFFSET",			"gpc_out" },
-	{ "SPBM_TE_TOTAL_GPU_IN_OFFSET",		"gpu_in" },
-	{ "SPBM_TE_GPC_IN_OFFSET",			"gpc_in" },
-	{ "SPBM_TE_TOTAL_SYS_IN_OFFSET",		"sys_in" },
-	{ "SPBM_TE_PREREG_IN_OFFSET",			"prereg_in" },
-	{ "SPBM_TE_DLA_IN_OFFSET",			"dla_in" },
-	{ "SPBM_TE_DLA_OUT_OFFSET",			"dla_out" },
+	{ "SPBM_TE_TOTAL_GPU_OUT_OFFSET",		"gpu" },
+	{ "SPBM_TE_PREREG_IN_OFFSET",			"prereg" },
+	{ "SPBM_TE_DLA_IN_OFFSET",			"dla" },
 	{ "SPBM_PL1_VAL_OFFSET",			"pl1" },
 	{ "SPBM_PL2_VAL_OFFSET",			"pl2" },
 	{ "SPBM_SYSPL1_VAL_OFFSET",			"syspl1" },
@@ -96,8 +91,7 @@ static const struct spbm_chan nrg_chans[] = {
 	{ "SPBM_PKG_ENERGY_VALUE_ACCUMULATE_OFFSET",	"pkg" },
 	{ "SPBM_CPU_E_ENERGY_VALUE_ACCUMULATE_OFFSET",	"cpu_e" },
 	{ "SPBM_CPU_P_ENERGY_VALUE_ACCUMULATE_OFFSET",	"cpu_p" },
-	{ "SPBM_GPC_ENERGY_VALUE_ACCUMULATE_OFFSET",	"gpc" },
-	{ "SPBM_GPM_ENERGY_VALUE_ACCUMULATE_OFFSET",	"gpm" },
+	{ "SPBM_GPM_ENERGY_VALUE_ACCUMULATE_OFFSET",	"gpu" },
 };
 #define N_NRG ARRAY_SIZE(nrg_chans)
 

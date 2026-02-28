@@ -5,7 +5,8 @@ full system power telemetry via standard `sensors` / sysfs interfaces.
 
 The driver reads the System Power Budget Manager (SPBM) shared memory,
 which is continuously updated by the MediaTek SSPM firmware with live
-power readings in milliwatts and cumulative energy counters in millijoules.
+power readings in milliwatts, cumulative energy counters in millijoules,
+and thermal zone temperatures in centidegrees Celsius.
 
 > [!NOTE]
 > NVIDIA has [officially stated](https://forums.developer.nvidia.com/t/help-needed-how-to-enable-grace-cpu-power-telemetry-on-dgx-spark-gb10/360631) there is "no method to monitor CPU power" on the DGX Spark.
@@ -15,48 +16,93 @@ power readings in milliwatts and cumulative energy counters in millijoules.
 
 ## Sensors
 
-23 power channels + 5 energy accumulators:
+### Power (23 channels)
 
 | Channel | Idle | Description |
 |---------|------|-------------|
-| sys_total | ~36 W | Total system power |
-| soc_pkg | ~22 W | SoC package |
-| cpu_gpu | ~10 W | CPU + GPU combined |
-| cpu_p | ~4.5 W | P-core cluster (10x Cortex-X925) |
-| cpu_e | ~0.1 W | E-core cluster (10x Cortex-A725) |
+| sys_total | ~25 W | Total system power |
+| soc_pkg | ~17 W | SoC package |
+| cpu_gpu | ~6 W | CPU + GPU combined |
+| cpu_p | ~0.5 W | P-core cluster (10x Cortex-X925) |
+| cpu_e | ~0.01 W | E-core cluster (10x Cortex-A725) |
 | vcore | ~4 W | Core voltage domain |
-| dc_input | ~36 W | DC input / charger rail |
-| gpu_out | ~4.8 W | GPU output (matches nvidia-smi) |
-| prereg_in | ~8 W | Pre-regulator input |
-| pl1 | 140 W | PL1 effective limit |
+| vddq | 0 W | VDDQ (DRAM voltage, always 0) |
+| dc_input | ~26 W | DC input / charger rail |
+| gpu | ~5 W | GPU power (matches nvidia-smi) |
+| prereg | ~8 W | Pre-regulator input |
+| dla | ~0.1 W | Deep Learning Accelerator |
+| pl1 | 140 W | PL1 effective power limit |
+| pl2 | 142 W | PL2 effective power limit |
 | syspl1 | 231 W | System PL1 effective limit |
-| pkg | cumulative | Package energy (mJ) |
-| cpu_e | cumulative | E-core energy (mJ) |
-| cpu_p | cumulative | P-core energy (mJ) |
+| syspl2 | 244 W | System PL2 effective limit |
+| budget_cpu | 105 W | CPU power budget allocation |
+| budget_gpu | 170 W | GPU power budget allocation |
+| budget_cpu_e | 19 W | E-core power budget allocation |
+| budget_cpu_p | 97 W | P-core power budget allocation |
+| ewma_pl1 | ~17 W | EWMA-smoothed power (PL1 controller) |
+| ewma_pl2 | ~18 W | EWMA-smoothed power (PL2 controller) |
+| ewma_syspl1 | ~26 W | EWMA-smoothed power (SysPL1 controller) |
+| ewma_syspl2 | ~26 W | EWMA-smoothed power (SysPL2 controller) |
 
-Under full load (all 20 cores): ~92 W package, ~64 W CPU_P, ~10.5 W CPU_E.
+### Energy (4 accumulators)
+
+| Channel | Description |
+|---------|-------------|
+| pkg | Package energy (cumulative) |
+| cpu_e | E-core energy (cumulative) |
+| cpu_p | P-core energy (cumulative) |
+| gpu | GPU energy (cumulative) |
 
 Energy accumulators are more accurate than instantaneous power readings
 for computing averages (the firmware uses a 100 ms PID control loop that
 causes instantaneous values to oscillate).
+
+### Temperature (9 zones)
+
+| Channel | Idle | Description |
+|---------|------|-------------|
+| tj_max | ~31 C | Package Tj max |
+| tj_max_c | ~0 C | Tj max headroom (distance to limit) |
+| cpu_e_clu0 | ~31 C | E-core cluster 0 |
+| cpu_p_clu0 | ~31 C | P-core cluster 0 |
+| cpu_e_clu1 | ~31 C | E-core cluster 1 |
+| cpu_p_clu1 | ~31 C | P-core cluster 1 |
+| gpu | ~31 C | GPU |
+| soc | ~31 C | SoC |
+| dla | ~27 C | DLA |
+
+### Status (custom sysfs)
+
+| Attribute | Description |
+|-----------|-------------|
+| prochot | PROCHOT thermal throttle status (0 = normal) |
+| pl_level | Current active power limit level |
+
+Under full load (all 20 cores): ~92 W package, ~64 W CPU_P, ~10.5 W CPU_E.
 
 ## Install via DKMS
 
 ```bash
 sudo apt install dkms
 sudo dkms add .
-sudo dkms build spbm/0.1.0
-sudo dkms install spbm/0.1.0
+sudo dkms build spbm/0.2.0
+sudo dkms install spbm/0.2.0
 ```
 
 The module auto-loads at boot via ACPI modalias matching (`NVDA8800`).
 DKMS automatically rebuilds the module on kernel updates.
 
+To uninstall:
+
+```bash
+sudo dkms remove spbm/0.2.0 --all
+```
+
 ## Manual Build
 
 ```bash
 make            # build and sign (requires MOK keys for Secure Boot)
-make load       # build, sign, load, show sensors
+sudo make load  # build, sign, load, show sensors
 make unload     # unload module
 make clean      # clean build artifacts
 ```
@@ -73,14 +119,23 @@ MOK signing keys are expected at `/var/lib/shim-signed/mok/MOK.{priv,der}`
 
 ## How It Works
 
-The driver binds as an `acpi_driver` to the `NVDA8800` (MTEL) ACPI device
-and extracts the SPBM shared memory address from the device's `_CRS`
-resources. The MTEL device lacks `_UID` and `_STA` in the DSDT, so the
-kernel never creates a `platform_device` for it — this is why a
-`platform_driver` cannot be used.
+The driver binds as an `acpi_driver` to the `NVDA8800` (MTEL) ACPI device.
+At probe time, it queries the device's `_DSM` method
+(UUID `12345678-1234-1234-1234-123456789abc`) to:
 
-The SPBM region was discovered by reverse-engineering the DSDT `_DSM`
-method for `NVDA8800` (UUID `12345678-1234-1234-1234-123456789abc`).
+1. **Discover resources** (function 1): locate the SPBM memory region index
+   among the device's `_CRS` resources
+2. **Resolve registers** (function 2): map canonical register names to offsets
+   within the SPBM region, rather than hard-coding addresses
+
+This makes the driver resilient to firmware updates that change the memory
+layout. Channels whose offsets cannot be resolved are automatically hidden.
+
+The MTEL device lacks `_UID` and `_STA` in the DSDT, so the kernel never
+creates a `platform_device` for it — this is why an `acpi_driver` is used
+instead of a `platform_driver`.
+
+The SPBM region was discovered by reverse-engineering the DSDT.
 No upstream Linux driver exists as of kernel 7.0.
 
 ## License
