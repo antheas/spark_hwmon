@@ -262,6 +262,40 @@ static const struct hwmon_chip_info spbm_chip = {
 	.info = spbm_info,
 };
 
+/* ACPI _DSM helpers */
+
+/*
+ * Query _DSM function 1 to get the resource name list, then return
+ * the index of the entry matching @name.  Returns -ENOENT if not found.
+ */
+static int spbm_dsm_find_resource(acpi_handle handle, const char *name)
+{
+	union acpi_object *out, *elem;
+	int i, ret = -ENOENT;
+
+	out = acpi_evaluate_dsm(handle, &mtel_dsm_guid, 0, 1, NULL);
+	if (!out)
+		return -ENODEV;
+
+	if (out->type != ACPI_TYPE_PACKAGE) {
+		ret = -EINVAL;
+		goto free;
+	}
+
+	for (i = 0; i < out->package.count; i++) {
+		elem = &out->package.elements[i];
+		if (elem->type == ACPI_TYPE_STRING &&
+		    !strcmp(elem->string.pointer, name)) {
+			ret = i;
+			break;
+		}
+	}
+
+free:
+	ACPI_FREE(out);
+	return ret;
+}
+
 /* ACPI driver */
 
 static int spbm_add(struct acpi_device *adev)
@@ -272,14 +306,22 @@ static int spbm_add(struct acpi_device *adev)
 	resource_size_t phys = 0;
 	struct spbm_priv *p;
 	struct device *hwdev;
-	int idx = 0, ret;
+	int spbm_idx, idx = 0, ret;
 	u32 test;
 
 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 
-	/* Find SPBM memory resource from _CRS (resource index SPBM_RES_IDX) */
+	/* Ask _DSM which _CRS resource is "SPBM" */
+	spbm_idx = spbm_dsm_find_resource(adev->handle, "SPBM");
+	if (spbm_idx < 0) {
+		dev_err(dev, "_DSM did not advertise SPBM resource (%d)\n",
+			spbm_idx);
+		return spbm_idx;
+	}
+
+	/* Walk _CRS to find the memory resource at that index */
 	INIT_LIST_HEAD(&res_list);
 	ret = acpi_dev_get_resources(adev, &res_list, NULL, NULL);
 	if (ret < 0)
@@ -287,7 +329,7 @@ static int spbm_add(struct acpi_device *adev)
 
 	list_for_each_entry(re, &res_list, node) {
 		if (resource_type(re->res) == IORESOURCE_MEM) {
-			if (idx == SPBM_RES_IDX) {
+			if (idx == spbm_idx) {
 				phys = re->res->start;
 				break;
 			}
@@ -297,7 +339,8 @@ static int spbm_add(struct acpi_device *adev)
 	acpi_dev_free_resource_list(&res_list);
 
 	if (!phys) {
-		dev_err(dev, "SPBM memory resource not found in _CRS\n");
+		dev_err(dev, "SPBM memory resource (index %d) not in _CRS\n",
+			spbm_idx);
 		return -ENODEV;
 	}
 
@@ -311,9 +354,9 @@ static int spbm_add(struct acpi_device *adev)
 		dev_warn(dev, "SYS_TOTAL=%u, telemetry may be inactive\n",
 			 test);
 	else
-		dev_info(dev, "live at 0x%llx: SYS=%u mW, SOC=%u mW, "
-			 "CPU_P=%u mW, GPU=%u mW\n", (u64)phys, test,
-			 ioread32(p->base + TE_SOC_PKG),
+		dev_info(dev, "live at 0x%llx (res %d): SYS=%u mW, SOC=%u mW,"
+			 " CPU_P=%u mW, GPU=%u mW\n", (u64)phys, spbm_idx,
+			 test, ioread32(p->base + TE_SOC_PKG),
 			 ioread32(p->base + TE_CPU_P),
 			 ioread32(p->base + TE_GPU_OUT));
 
@@ -322,8 +365,8 @@ static int spbm_add(struct acpi_device *adev)
 	if (IS_ERR(hwdev))
 		return PTR_ERR(hwdev);
 
-	dev_info(dev, "registered %zu power + %zu energy hwmon channels\n",
-		 N_PWR, N_NRG);
+	dev_info(dev, "registered %zu power + %zu energy + %zu temp channels\n",
+		 N_PWR, N_NRG, N_TEMP);
 
 	return 0;
 }
