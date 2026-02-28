@@ -33,10 +33,10 @@ SysPL1, SysPL2).
 | gpu | ~5 W | GPU power (matches nvidia-smi) |
 | prereg | ~8 W | Pre-regulator input |
 | dla | ~0.1 W | Deep Learning Accelerator |
-| pl1 | ~18 W | EWMA power seen by PL1 controller (max=140W, cap=rw) |
-| pl2 | ~18 W | EWMA power seen by PL2 controller (max=142W, cap=rw) |
-| syspl1 | ~26 W | EWMA power seen by SysPL1 controller (max=231W, cap=rw) |
-| syspl2 | ~27 W | EWMA power seen by SysPL2 controller (max=244W, cap=rw) |
+| pl1 | ~18 W | EWMA power seen by PL1 controller (max=250W, cap=rw) |
+| pl2 | ~18 W | EWMA power seen by PL2 controller (max=250W, cap=rw) |
+| syspl1 | ~26 W | EWMA power seen by SysPL1 controller (max=300W, cap=rw) |
+| syspl2 | ~27 W | EWMA power seen by SysPL2 controller (max=300W, cap=rw) |
 | budget_cpu | 105 W | CPU power budget allocation |
 | budget_gpu | 170 W | GPU power budget allocation |
 | budget_cpu_e | 19 W | E-core power budget allocation |
@@ -80,10 +80,11 @@ causes instantaneous values to oscillate).
 
 The `pl1`, `pl2`, `syspl1`, and `syspl2` power channels expose standard
 hwmon `power_cap` (read/write), `power_max`, and `power_min` (read-only)
-attributes, in microwatts. `power_max` reads the EC default limit directly
-from the firmware's `PL_VAL_EC` registers. `power_min` is always 0.
+attributes, in microwatts. `power_max` and `power_min` read the firmware's
+`LIMIT_HIGH` and `LIMIT_LOW` registers (absolute hardware ceiling/floor).
 `power_cap` shows the effective limit (EC default when no OS override is set).
-Writes above `power_max` are rejected. Write 0 to reset to the EC default.
+Writes outside the `power_min`..`power_max` range are rejected.
+Write 0 to reset to the EC default.
 
 Example: limit sustained power to 100W:
 
