@@ -211,10 +211,11 @@ static int spbm_read(struct device *dev, enum hwmon_sensor_types type,
 		}
 		if (attr == hwmon_power_cap &&
 		    p->pwr_cap_off[ch] != OFF_UNKNOWN) {
-			raw = ioread32(p->base + p->pwr_cap_off[ch]);
-			/* If OS limit not set, show effective limit */
-			if (raw == 0 && p->pwr_eff_off[ch] != OFF_UNKNOWN)
+			/* Always prefer effective limit; fall back to OS reg */
+			if (p->pwr_eff_off[ch] != OFF_UNKNOWN)
 				raw = ioread32(p->base + p->pwr_eff_off[ch]);
+			else
+				raw = ioread32(p->base + p->pwr_cap_off[ch]);
 			*val = (long)raw * 1000; /* mW -> uW */
 			return 0;
 		}
