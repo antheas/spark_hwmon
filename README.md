@@ -77,6 +77,26 @@ causes instantaneous values to oscillate).
 | prochot | PROCHOT thermal throttle status (0 = normal) |
 | pl_level | Current active power limit level |
 
+### Power Limit Control (hwmon power_cap, read/write)
+
+The `pl1`, `pl2`, `syspl1`, and `syspl2` power channels expose a writable
+`power_cap` attribute (standard hwmon ABI, in microwatts). The firmware takes
+`min(OS, EC)` as the effective limit. Reading `power_cap` returns the current
+effective limit (from the EC when no OS override is set). Write 0 to reset
+to the EC default.
+
+Example: limit sustained power to 100W:
+
+```bash
+echo 100000000 | sudo tee /sys/class/hwmon/hwmonN/power11_cap
+```
+
+Reset to default:
+
+```bash
+echo 0 | sudo tee /sys/class/hwmon/hwmonN/power11_cap
+```
+
 Under full load (all 20 cores): ~92 W package, ~64 W CPU_P, ~10.5 W CPU_E.
 
 ## Install via DKMS

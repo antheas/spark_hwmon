@@ -115,12 +115,23 @@ static const struct spbm_chan status_chans[] = {
 };
 #define N_STATUS ARRAY_SIZE(status_chans)
 
+/* OS-writable power limit registers (mW) */
+static const struct spbm_chan pl_os_chans[] = {
+	{ "SPBM_PL1_VAL_OS_OFFSET",		"pl1_os" },
+	{ "SPBM_PL2_VAL_OS_OFFSET",		"pl2_os" },
+	{ "SPBM_SYSPL1_VAL_OS_OFFSET",		"syspl1_os" },
+	{ "SPBM_SYSPL2_VAL_OS_OFFSET",		"syspl2_os" },
+};
+#define N_PL_OS ARRAY_SIZE(pl_os_chans)
+
 struct spbm_priv {
 	void __iomem *base;
 	u32 pwr_off[N_PWR];
+	u32 pwr_cap_off[N_PWR];	/* OS limit for power_cap, or OFF_UNKNOWN */
 	u32 nrg_off[N_NRG];
 	u32 temp_off[N_TEMP];
 	u32 status_off[N_STATUS];
+	u32 pl_os_off[N_PL_OS];
 };
 
 /* hwmon callbacks */
@@ -134,6 +145,9 @@ static umode_t spbm_visible(const void *data, enum hwmon_sensor_types type,
 	    p->pwr_off[ch] != OFF_UNKNOWN &&
 	    (attr == hwmon_power_input || attr == hwmon_power_label))
 		return 0444;
+	if (type == hwmon_power && attr == hwmon_power_cap && ch < N_PWR &&
+	    p->pwr_cap_off[ch] != OFF_UNKNOWN)
+		return 0644;
 	if (type == hwmon_energy && ch < N_NRG &&
 	    p->nrg_off[ch] != OFF_UNKNOWN &&
 	    (attr == hwmon_energy_input || attr == hwmon_energy_label))
@@ -151,11 +165,22 @@ static int spbm_read(struct device *dev, enum hwmon_sensor_types type,
 	struct spbm_priv *p = dev_get_drvdata(dev);
 	u32 raw;
 
-	if (type == hwmon_power && attr == hwmon_power_input && ch < N_PWR &&
-	    p->pwr_off[ch] != OFF_UNKNOWN) {
-		raw = ioread32(p->base + p->pwr_off[ch]);
-		*val = (long)raw * 1000; /* mW -> uW */
-		return 0;
+	if (type == hwmon_power && ch < N_PWR) {
+		if (attr == hwmon_power_input &&
+		    p->pwr_off[ch] != OFF_UNKNOWN) {
+			raw = ioread32(p->base + p->pwr_off[ch]);
+			*val = (long)raw * 1000; /* mW -> uW */
+			return 0;
+		}
+		if (attr == hwmon_power_cap &&
+		    p->pwr_cap_off[ch] != OFF_UNKNOWN) {
+			raw = ioread32(p->base + p->pwr_cap_off[ch]);
+			/* If OS limit not set, show effective (EC) limit */
+			if (raw == 0 && p->pwr_off[ch] != OFF_UNKNOWN)
+				raw = ioread32(p->base + p->pwr_off[ch]);
+			*val = (long)raw * 1000; /* mW -> uW */
+			return 0;
+		}
 	}
 	if (type == hwmon_energy && attr == hwmon_energy_input && ch < N_NRG &&
 	    p->nrg_off[ch] != OFF_UNKNOWN) {
@@ -190,16 +215,31 @@ static int spbm_read_string(struct device *dev, enum hwmon_sensor_types type,
 	return -EOPNOTSUPP;
 }
 
+static int spbm_write(struct device *dev, enum hwmon_sensor_types type,
+		      u32 attr, int ch, long val)
+{
+	struct spbm_priv *p = dev_get_drvdata(dev);
+
+	if (type == hwmon_power && attr == hwmon_power_cap && ch < N_PWR &&
+	    p->pwr_cap_off[ch] != OFF_UNKNOWN) {
+		iowrite32((u32)(val / 1000), p->base + p->pwr_cap_off[ch]);
+		iowrite32(1, p->base);	/* poke UPDATE_SPBM */
+		return 0;
+	}
+	return -EOPNOTSUPP;
+}
+
 static const struct hwmon_ops spbm_ops = {
 	.is_visible = spbm_visible,
 	.read = spbm_read,
+	.write = spbm_write,
 	.read_string = spbm_read_string,
 };
 
 /* Build config arrays with a trailing 0 sentinel */
 
 static const u32 pwr_cfg[N_PWR + 1] = {
-	[0 ... N_PWR - 1] = HWMON_P_INPUT | HWMON_P_LABEL,
+	[0 ... N_PWR - 1] = HWMON_P_INPUT | HWMON_P_LABEL | HWMON_P_CAP,
 	[N_PWR] = 0,
 };
 
@@ -401,7 +441,11 @@ static int spbm_dsm_resolve_offsets(struct device *dev, acpi_handle handle,
 			    spbm_try_resolve(elem[ni].string.pointer,
 					     elem[oi].integer.value,
 					     status_chans, p->status_off,
-					     N_STATUS))
+					     N_STATUS) ||
+			    spbm_try_resolve(elem[ni].string.pointer,
+					     elem[oi].integer.value,
+					     pl_os_chans, p->pl_os_off,
+					     N_PL_OS))
 				resolved++;
 		}
 	}
@@ -420,7 +464,7 @@ static int spbm_add(struct acpi_device *adev)
 	resource_size_t phys = 0;
 	struct spbm_priv *p;
 	struct device *hwdev;
-	int spbm_idx, idx = 0, ret, resolved;
+	int spbm_idx, idx = 0, ret, resolved, i, j;
 
 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
 	if (!p)
@@ -428,9 +472,11 @@ static int spbm_add(struct acpi_device *adev)
 
 	/* Initialize all offsets to "unknown" */
 	memset(p->pwr_off, 0xFF, sizeof(p->pwr_off));
+	memset(p->pwr_cap_off, 0xFF, sizeof(p->pwr_cap_off));
 	memset(p->nrg_off, 0xFF, sizeof(p->nrg_off));
 	memset(p->temp_off, 0xFF, sizeof(p->temp_off));
 	memset(p->status_off, 0xFF, sizeof(p->status_off));
+	memset(p->pl_os_off, 0xFF, sizeof(p->pl_os_off));
 
 	/* Ask _DSM which _CRS resource is "SPBM" */
 	spbm_idx = spbm_dsm_find_resource(adev->handle, "SPBM");
@@ -447,7 +493,28 @@ static int spbm_add(struct acpi_device *adev)
 		return resolved;
 	}
 	dev_info(dev, "resolved %d/%zu register offsets from _DSM\n",
-		 resolved, N_PWR + N_NRG + N_TEMP + N_STATUS);
+		 resolved, N_PWR + N_NRG + N_TEMP + N_STATUS + N_PL_OS);
+
+	/*
+	 * Map OS power limit offsets to power_cap on matching power channels.
+	 * pl_os_chans labels are "pl1_os", "pl2_os", etc; match by stripping
+	 * the "_os" suffix against power channel labels "pl1", "pl2", etc.
+	 */
+	for (i = 0; i < N_PL_OS; i++) {
+		size_t plen;
+
+		if (p->pl_os_off[i] == OFF_UNKNOWN)
+			continue;
+		for (j = 0; j < N_PWR; j++) {
+			plen = strlen(pwr_chans[j].label);
+			if (!strncmp(pl_os_chans[i].label,
+				     pwr_chans[j].label, plen) &&
+			    !strcmp(pl_os_chans[i].label + plen, "_os")) {
+				p->pwr_cap_off[j] = p->pl_os_off[i];
+				break;
+			}
+		}
+	}
 
 	/* Walk _CRS to find the memory resource at that index */
 	INIT_LIST_HEAD(&res_list);
