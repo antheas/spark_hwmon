@@ -75,10 +75,6 @@ static const struct spbm_chan pwr_chans[] = {
 	{ "SPBM_PWR_AVG_EWMA_S_PL2_OFFSET",			"pl2" },
 	{ "SPBM_PWR_AVG_EWMA_S_SYSPL1_OFFSET",		"syspl1" },
 	{ "SPBM_PWR_AVG_EWMA_S_SYSPL2_OFFSET",		"syspl2" },
-	{ "SPBM_BUDGET_CPU_INST_OFFSET",			"budget_cpu" },
-	{ "SPBM_BUDGET_GPU_INST_OFFSET",			"budget_gpu" },
-	{ "SPBM_BUDGET_CPU_E_INST_OFFSET",			"budget_cpu_e" },
-	{ "SPBM_BUDGET_CPU_P_INST_OFFSET",			"budget_cpu_p" },
 };
 #define N_PWR ARRAY_SIZE(pwr_chans)
 

@@ -19,7 +19,7 @@ SysPL1, SysPL2).
 
 ## Sensors
 
-### Power (18 channels)
+### Power (14 channels)
 
 | Channel | Idle | Description |
 |---------|------|-------------|
@@ -37,10 +37,6 @@ SysPL1, SysPL2).
 | pl2 | ~18 W | EWMA power seen by PL2 controller (max=250W, cap=rw) |
 | syspl1 | ~26 W | EWMA power seen by SysPL1 controller (max=300W, cap=rw) |
 | syspl2 | ~27 W | EWMA power seen by SysPL2 controller (max=300W, cap=rw) |
-| budget_cpu | 105 W | CPU power budget allocation |
-| budget_gpu | 170 W | GPU power budget allocation |
-| budget_cpu_e | 19 W | E-core power budget allocation |
-| budget_cpu_p | 97 W | P-core power budget allocation |
 
 ### Energy (4 accumulators)
 
