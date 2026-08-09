@@ -1,3 +1,5 @@
+
+
 # SPBM - DGX Spark Power Telemetry & Control hwmon Driver
 
 Linux hwmon driver for the NVIDIA DGX Spark (GB10 SoC) that exposes
@@ -105,7 +107,7 @@ Under full load (all 20 cores): ~92 W package, ~64 W CPU_P, ~10.5 W CPU_E.
 Monitor all channels live:
 
 ```bash
-watch -n 0.1 sensors 'spbm-*'
+watch -n 0.1 sensors
 ```
 
 ## Install via DKMS
