@@ -14,9 +14,11 @@
  * cumulative energy counters in millijoules, and thermal zone
  * temperatures in centidegrees Celsius.
  *
- * This driver binds as an acpi_driver to the NVDA8800 device on the
- * ACPI bus. The device has no platform_device (missing _UID/_STA in
- * DSDT), so a platform_driver cannot be used.
+ * This driver binds as a platform_driver to NVDA8800. On kernels where
+ * the ACPI device creates a platform_device (e.g. Linux 7.3+), that is
+ * the correct binding; earlier kernels used acpi_driver because no
+ * platform_device existed. Matching still uses the ACPI HID via
+ * .acpi_match_table.
  *
  * Usage:
  *   sudo modprobe spbm   (or auto-loaded via DKMS + udev)
@@ -32,6 +34,7 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
+#include <linux/platform_device.h>
 #include <linux/list.h>
 #include <linux/uuid.h>
 
@@ -40,6 +43,15 @@
 
 /* Sentinel: offset not discovered via _DSM */
 #define OFF_UNKNOWN	U32_MAX
+
+/*
+ * The firmware's PL1 ceiling is 250 W, well above the GB10's 140 W rating,
+ * so changing the limits is left to someone who asks for it.
+ */
+static bool allow_power_cap;
+module_param(allow_power_cap, bool, 0444);
+MODULE_PARM_DESC(allow_power_cap,
+		 "Let root change the PL1, PL2, SYSPL1 and SYSPL2 power limits (default: read-only)");
 
 /*
  * _DSM UUID for NVDA8800 MTEL device.
@@ -117,6 +129,12 @@ static const struct spbm_chan pl_os_chans[] = {
 };
 #define N_PL_OS ARRAY_SIZE(pl_os_chans)
 
+/* Register the firmware rereads the limits on */
+static const struct spbm_chan update_chans[] = {
+	{ "UPDATE_SPBM",			"update" },
+};
+#define N_UPDATE ARRAY_SIZE(update_chans)
+
 /* Firmware power limit ceiling (read-only, for power_max) */
 static const struct spbm_chan pwr_high_chans[] = {
 	{ "SPBM_PL1_LIMIT_HIGH_OFFSET",		"pl1" },
@@ -155,6 +173,7 @@ struct spbm_priv {
 	u32 temp_off[N_TEMP];
 	u32 status_off[N_STATUS];
 	u32 pl_os_off[N_PL_OS];
+	u32 update_off[N_UPDATE];
 	u32 pwr_high_off[N_PWR_HIGH];	/* resolved high offsets (temp) */
 	u32 pwr_low_off[N_PWR_LOW];	/* resolved low offsets (temp) */
 	u32 pwr_eff_resolve[N_PWR_EFF];	/* resolved effective offsets (temp) */
@@ -167,6 +186,18 @@ struct spbm_priv {
 
 /* hwmon callbacks */
 
+/*
+ * A limit is changed only if the firmware's map gave its floor, its ceiling
+ * and the update register, so every write is checked and takes effect.
+ */
+static bool spbm_cap_writable(const struct spbm_priv *p, int ch)
+{
+	return p->pwr_cap_off[ch] != OFF_UNKNOWN &&
+	       p->pwr_max_off[ch] != OFF_UNKNOWN &&
+	       p->pwr_min_off[ch] != OFF_UNKNOWN &&
+	       p->update_off[0] != OFF_UNKNOWN;
+}
+
 static umode_t spbm_visible(const void *data, enum hwmon_sensor_types type,
 			     u32 attr, int ch)
 {
@@ -178,7 +209,7 @@ static umode_t spbm_visible(const void *data, enum hwmon_sensor_types type,
 		return 0444;
 	if (type == hwmon_power && attr == hwmon_power_cap && ch < N_PWR &&
 	    p->pwr_cap_off[ch] != OFF_UNKNOWN)
-		return 0644;
+		return allow_power_cap && spbm_cap_writable(p, ch) ? 0644 : 0444;
 	if (type == hwmon_power && attr == hwmon_power_max && ch < N_PWR &&
 	    p->pwr_max_off[ch] != OFF_UNKNOWN)
 		return 0444;
@@ -272,7 +303,16 @@ static int spbm_write(struct device *dev, enum hwmon_sensor_types type,
 
 	if (type == hwmon_power && attr == hwmon_power_cap && ch < N_PWR &&
 	    p->pwr_cap_off[ch] != OFF_UNKNOWN) {
-		u32 mw = (u32)(val / 1000);
+		u32 mw;
+
+		if (!allow_power_cap || !spbm_cap_writable(p, ch))
+			return -EPERM;
+		if (val < 0 || val / 1000 > U32_MAX)
+			return -EINVAL;
+		mw = val / 1000;
+		/* Zero resets the limit, so only an exact 0 may ask for that. */
+		if (val > 0 && mw == 0)
+			return -EINVAL;
 
 		/* Enforce firmware floor <= cap <= ceiling; 0 = reset */
 		if (mw > 0 && p->pwr_max_off[ch] != OFF_UNKNOWN &&
@@ -282,7 +322,7 @@ static int spbm_write(struct device *dev, enum hwmon_sensor_types type,
 		    mw < ioread32(p->base + p->pwr_min_off[ch]))
 			return -EINVAL;
 		iowrite32(mw, p->base + p->pwr_cap_off[ch]);
-		iowrite32(1, p->base);	/* poke UPDATE_SPBM */
+		iowrite32(1, p->base + p->update_off[0]);
 		return 0;
 	}
 	return -EOPNOTSUPP;
@@ -461,6 +501,14 @@ static int spbm_dsm_resolve_offsets(struct device *dev, acpi_handle handle,
 			if (elem[ni].type != ACPI_TYPE_STRING ||
 			    elem[oi].type != ACPI_TYPE_INTEGER)
 				continue;
+			/*
+			 * Only SPBM's 4 KiB page is mapped, and other regions'
+			 * maps hold offsets far beyond it, so a register is
+			 * used only if it lies wholly inside the page.
+			 */
+			if (elem[oi].integer.value > SPBM_SIZE - sizeof(u32) ||
+			    elem[oi].integer.value % sizeof(u32))
+				continue;
 
 			if (spbm_try_resolve(elem[ni].string.pointer,
 					     elem[oi].integer.value,
@@ -490,7 +538,11 @@ static int spbm_dsm_resolve_offsets(struct device *dev, acpi_handle handle,
 			    spbm_try_resolve(elem[ni].string.pointer,
 					     elem[oi].integer.value,
 					     pwr_eff_chans, p->pwr_eff_resolve,
-					     N_PWR_EFF))
+					     N_PWR_EFF) ||
+			    spbm_try_resolve(elem[ni].string.pointer,
+					     elem[oi].integer.value,
+					     update_chans, p->update_off,
+					     N_UPDATE))
 				resolved++;
 		}
 	}
@@ -499,17 +551,21 @@ static int spbm_dsm_resolve_offsets(struct device *dev, acpi_handle handle,
 	return resolved;
 }
 
-/* ACPI driver */
+/* Platform driver (ACPI-enumerated) */
 
-static int spbm_add(struct acpi_device *adev)
+static int spbm_probe(struct platform_device *pdev)
 {
-	struct device *dev = &adev->dev;
+	struct device *dev = &pdev->dev;
+	struct acpi_device *adev = ACPI_COMPANION(dev);
 	struct list_head res_list;
 	struct resource_entry *re;
-	resource_size_t phys = 0;
+	resource_size_t phys = 0, size = 0;
 	struct spbm_priv *p;
 	struct device *hwdev;
 	int spbm_idx, idx = 0, ret, resolved, i, j;
+
+	if (!adev)
+		return -ENODEV;
 
 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
 	if (!p)
@@ -528,6 +584,7 @@ static int spbm_add(struct acpi_device *adev)
 	memset(p->temp_off, 0xFF, sizeof(p->temp_off));
 	memset(p->status_off, 0xFF, sizeof(p->status_off));
 	memset(p->pl_os_off, 0xFF, sizeof(p->pl_os_off));
+	memset(p->update_off, 0xFF, sizeof(p->update_off));
 
 	/* Ask _DSM which _CRS resource is "SPBM" */
 	spbm_idx = spbm_dsm_find_resource(adev->handle, "SPBM");
@@ -555,7 +612,16 @@ static int spbm_add(struct acpi_device *adev)
 	dev_info(dev, "resolved %d/%zu register offsets from _DSM\n",
 		 resolved,
 		 N_PWR + N_NRG + N_TEMP + N_STATUS + N_PL_OS + N_PWR_HIGH +
-		 N_PWR_LOW + N_PWR_EFF);
+		 N_PWR_LOW + N_PWR_EFF + N_UPDATE);
+
+	/*
+	 * Whole-system power is what the driver is for, so a map without it
+	 * is not one this driver understands.
+	 */
+	if (p->pwr_off[0] == OFF_UNKNOWN) {
+		dev_err(dev, "_DSM did not give %s\n", pwr_chans[0].dsm_key);
+		return -ENODEV;
+	}
 
 	/*
 	 * Map OS power limit offsets to power_cap on matching power channels.
@@ -588,6 +654,7 @@ static int spbm_add(struct acpi_device *adev)
 		if (resource_type(re->res) == IORESOURCE_MEM) {
 			if (idx == spbm_idx) {
 				phys = re->res->start;
+				size = resource_size(re->res);
 				break;
 			}
 			idx++;
@@ -598,6 +665,13 @@ static int spbm_add(struct acpi_device *adev)
 	if (!phys) {
 		dev_err(dev, "SPBM memory resource (index %d) not in _CRS\n",
 			spbm_idx);
+		return -ENODEV;
+	}
+
+	/* Offsets were bounded to SPBM_SIZE, so the region must be that big. */
+	if (size < SPBM_SIZE) {
+		dev_err(dev, "SPBM memory resource is %pa bytes, expected %#x\n",
+			&size, SPBM_SIZE);
 		return -ENODEV;
 	}
 
@@ -690,14 +764,14 @@ static const struct acpi_device_id spbm_acpi_ids[] = {
 };
 MODULE_DEVICE_TABLE(acpi, spbm_acpi_ids);
 
-static struct acpi_driver spbm_driver = {
-	.name = DRIVER_NAME,
-	.ids = spbm_acpi_ids,
-	.ops = {
-		.add = spbm_add,
+static struct platform_driver spbm_driver = {
+	.probe = spbm_probe,
+	.driver = {
+		.name = DRIVER_NAME,
+		.acpi_match_table = spbm_acpi_ids,
 	},
 };
-module_acpi_driver(spbm_driver);
+module_platform_driver(spbm_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Antheas Kapenekakis <antheas@cs.aau.dk>");
