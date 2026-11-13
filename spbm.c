@@ -14,9 +14,11 @@
  * cumulative energy counters in millijoules, and thermal zone
  * temperatures in centidegrees Celsius.
  *
- * This driver binds as an acpi_driver to the NVDA8800 device on the
- * ACPI bus. The device has no platform_device (missing _UID/_STA in
- * DSDT), so a platform_driver cannot be used.
+ * This driver binds as a platform_driver to NVDA8800. On kernels where
+ * the ACPI device creates a platform_device (e.g. Linux 7.3+), that is
+ * the correct binding; earlier kernels used acpi_driver because no
+ * platform_device existed. Matching still uses the ACPI HID via
+ * .acpi_match_table.
  *
  * Usage:
  *   sudo modprobe spbm   (or auto-loaded via DKMS + udev)
@@ -32,6 +34,7 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
+#include <linux/platform_device.h>
 #include <linux/list.h>
 #include <linux/uuid.h>
 
@@ -548,17 +551,21 @@ static int spbm_dsm_resolve_offsets(struct device *dev, acpi_handle handle,
 	return resolved;
 }
 
-/* ACPI driver */
+/* Platform driver (ACPI-enumerated) */
 
-static int spbm_add(struct acpi_device *adev)
+static int spbm_probe(struct platform_device *pdev)
 {
-	struct device *dev = &adev->dev;
+	struct device *dev = &pdev->dev;
+	struct acpi_device *adev = ACPI_COMPANION(dev);
 	struct list_head res_list;
 	struct resource_entry *re;
 	resource_size_t phys = 0, size = 0;
 	struct spbm_priv *p;
 	struct device *hwdev;
 	int spbm_idx, idx = 0, ret, resolved, i, j;
+
+	if (!adev)
+		return -ENODEV;
 
 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
 	if (!p)
@@ -757,14 +764,14 @@ static const struct acpi_device_id spbm_acpi_ids[] = {
 };
 MODULE_DEVICE_TABLE(acpi, spbm_acpi_ids);
 
-static struct acpi_driver spbm_driver = {
-	.name = DRIVER_NAME,
-	.ids = spbm_acpi_ids,
-	.ops = {
-		.add = spbm_add,
+static struct platform_driver spbm_driver = {
+	.probe = spbm_probe,
+	.driver = {
+		.name = DRIVER_NAME,
+		.acpi_match_table = spbm_acpi_ids,
 	},
 };
-module_acpi_driver(spbm_driver);
+module_platform_driver(spbm_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Antheas Kapenekakis <antheas@cs.aau.dk>");
